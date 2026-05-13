@@ -185,24 +185,9 @@ ai_melli/
 
 
 
----
 
 ## ⚠️ سلب مسئولیت
 
 این پروژه برای استفاده شخصی و آموزشی طراحی شده. کاربران مسئول رعایت شرایط استفاده از سرویس‌هایی هستن که این ابزار ازشون استفاده می‌کنه، و همچنین باید قوانین کشورشون رو رعایت کنن.
 
----
 
-## ⭐ حمایت
-
-اگه این ابزار به کارت اومد، با زدن ستاره ⭐ ازم حمایت کن — به پیدا شدن پروژه توسط بقیه کمک می‌کنه!
-
-</div>
-
-<a href="https://www.star-history.com/?repos=amirabolfazle%2Fai_melli&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=amirabolfazle/ai_melli&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=amirabolfazle/ai_melli&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=amirabolfazle/ai_melli&type=date&legend=top-left" />
- </picture>
-</a>
