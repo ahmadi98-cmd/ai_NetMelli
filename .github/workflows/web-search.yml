@@ -1,0 +1,754 @@
+# ============================================================
+# 🔍 AI Melli — Web Search
+# ============================================================
+
+name: "🔍 Web Search"
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Search query (English or Persian)"
+        required: true
+        type: string
+
+      num_results:
+        description: "Number of results (1-20)"
+        required: false
+        default: "10"
+        type: string
+
+      search_type:
+        description: "Search type"
+        required: true
+        default: "general"
+        type: choice
+        options:
+          - general
+          - news
+          - images
+          - videos
+
+      safe_search:
+        description: "Safe search"
+        required: false
+        default: "moderate"
+        type: choice
+        options:
+          - "off"
+          - moderate
+          - strict
+
+      language:
+        description: "Search language"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - en
+          - fa
+          - ar
+          - fr
+          - de
+          - es
+          - zh
+          - ja
+
+      deep_search:
+        description: "Deep search (more results)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      include_ai_summary:
+        description: "Include AI summary of results"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      upload_method:
+        description: "Upload Method"
+        required: true
+        default: "repository"
+        type: choice
+        options:
+          - repository
+          - release
+
+      release_tag:
+        description: "Release Tag (empty = auto)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: "📁 Prepare scripts"
+        shell: bash
+        run: mkdir -p scripts output
+
+      - name: "🐍 Create web search script"
+        shell: bash
+        run: |
+          cat > scripts/web_search.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """
+          AI Melli — Web Search Engine
+          Direct HTTP search (no third-party library needed)
+          """
+          import json, sys, os, time, re
+          import urllib.request
+          import urllib.parse
+          from datetime import datetime, timezone, timedelta
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+          }
+
+          def http_get(url, timeout=30):
+              """Simple HTTP GET with retry."""
+              for attempt in range(3):
+                  try:
+                      req = urllib.request.Request(url, headers=HEADERS)
+                      with urllib.request.urlopen(req, timeout=timeout) as resp:
+                          return resp.read().decode("utf-8", errors="replace")
+                  except Exception as e:
+                      print(f"  Attempt {attempt+1} failed: {e}")
+                      if attempt < 2:
+                          time.sleep(2)
+              return None
+
+          def http_post_json(url, payload, timeout=60):
+              """HTTP POST with JSON body."""
+              data = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(url, data=data, method="POST")
+              req.add_header("Content-Type", "application/json")
+              req.add_header("User-Agent", HEADERS["User-Agent"])
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(req, timeout=timeout) as resp:
+                          return resp.read().decode("utf-8", errors="replace")
+                  except Exception as e:
+                      print(f"  Attempt {attempt+1} failed: {e}")
+                      if attempt < 2:
+                          time.sleep(3)
+              return None
+
+          # =============================================
+          #  DuckDuckGo Lite HTML Parser (No library!)
+          # =============================================
+          def search_ddg_lite(query, max_results):
+              """Search via DuckDuckGo Lite HTML - no dependencies."""
+              results = []
+              encoded = urllib.parse.quote(query, safe="")
+              url = f"https://lite.duckduckgo.com/lite/?q={encoded}"
+              print(f"  DDG Lite URL: {url}")
+              
+              html = http_get(url, timeout=30)
+              if not html:
+                  print("  DDG Lite: No response")
+                  return results
+              
+              print(f"  DDG Lite: Got {len(html)} chars of HTML")
+              
+              # Parse results from DuckDuckGo Lite HTML
+              # Each result is in a <tr class="result-link"> with <a> and next <td> has snippet
+              # Pattern: <a rel="nofollow" class="result-link" href="URL">TITLE</a>
+              # Then: <td class="result-snippet">DESCRIPTION</td>
+              
+              # Method 1: Parse link+title
+              link_pattern = re.compile(
+                  r'<a[^>]+class="result-link"[^>]+href="([^"]*)"[^>]*>(.*?)</a>',
+                  re.DOTALL
+              )
+              # Method 2: Parse snippets
+              snippet_pattern = re.compile(
+                  r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>',
+                  re.DOTALL
+              )
+              # Method 3: Alternative DDG Lite format (2024+)
+              link_pattern2 = re.compile(
+                  r'<a[^>]+href="(https?://[^"]*)"[^>]*class="[^"]*result[^"]*"[^>]*>(.*?)</a>',
+                  re.DOTALL
+              )
+              snippet_pattern2 = re.compile(
+                  r'class="result__snippet"[^>]*>(.*?)</(?:td|a|div)>',
+                  re.DOTALL
+              )
+              
+              def clean_html(text):
+                  """Remove HTML tags."""
+                  text = re.sub(r'<[^>]+>', '', str(text))
+                  text = re.sub(r'&amp;', '&', text)
+                  text = re.sub(r'&lt;', '<', text)
+                  text = re.sub(r'&gt;', '>', text)
+                  text = re.sub(r'&quot;', '"', text)
+                  text = re.sub(r'&#39;', "'", text)
+                  text = re.sub(r'&nbsp;', ' ', text)
+                  text = re.sub(r'\s+', ' ', text).strip()
+                  return text
+              
+              links = link_pattern.findall(html)
+              snippets = snippet_pattern.findall(html)
+              
+              # If method 1 didn't find anything, try method 2
+              if not links:
+                  links = link_pattern2.findall(html)
+                  snippets = snippet_pattern2.findall(html)
+              
+              print(f"  DDG Lite: Found {len(links)} links, {len(snippets)} snippets")
+              
+              for i, (raw_url, raw_title) in enumerate(links):
+                  if i >= max_results:
+                      break
+                  title = clean_html(raw_title)
+                  url_val = clean_html(raw_url)
+                  # DDG Lite uses redirect URLs, extract real URL
+                  if "uddg=" in url_val:
+                      try:
+                          from urllib.parse import parse_qs, urlparse
+                          parsed = urlparse(url_val)
+                          qs = parse_qs(parsed.query)
+                          if "uddg" in qs:
+                              url_val = urllib.parse.unquote(qs["uddg"][0])
+                      except:
+                          pass
+                  
+                  desc = ""
+                  if i < len(snippets):
+                      desc = clean_html(snippets[i])
+                  
+                  if title and url_val and url_val.startswith("http"):
+                      results.append({
+                          "title": title,
+                          "url": url_val,
+                          "description": desc,
+                          "type": "general"
+                      })
+              
+              return results
+
+          # =============================================
+          #  DuckDuckGo API Search (Instant Answer + Web)
+          # =============================================
+          def search_ddg_api(query, max_results):
+              """Search via DuckDuckGo Instant Answer API."""
+              results = []
+              encoded = urllib.parse.quote(query, safe="")
+              url = f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
+              print(f"  DDG API URL: {url}")
+              
+              html = http_get(url, timeout=15)
+              if not html:
+                  print("  DDG API: No response")
+                  return results
+              
+              try:
+                  data = json.loads(html)
+                  print(f"  DDG API: Got response, type={data.get('Type','none')}")
+                  
+                  # Abstract / Instant Answer
+                  abstract = data.get("Abstract", "")
+                  abstract_url = data.get("AbstractURL", "")
+                  abstract_source = data.get("AbstractSource", "")
+                  if abstract and abstract_url:
+                      results.append({
+                          "title": data.get("Heading", query),
+                          "url": abstract_url,
+                          "description": abstract,
+                          "source": abstract_source,
+                          "type": "general"
+                      })
+                  
+                  # Related Topics
+                  for topic in data.get("RelatedTopics", []):
+                      if isinstance(topic, dict):
+                          text = topic.get("Text", "")
+                          url_val = topic.get("FirstURL", "")
+                          if text and url_val:
+                              results.append({
+                                  "title": topic.get("Text", "").split(".")[0][:100],
+                                  "url": url_val,
+                                  "description": text,
+                                  "type": "general"
+                              })
+                      elif isinstance(topic, dict) and "Topics" in topic:
+                          for sub in topic["Topics"]:
+                              text = sub.get("Text", "")
+                              url_val = sub.get("FirstURL", "")
+                              if text and url_val:
+                                  results.append({
+                                      "title": text.split(".")[0][:100],
+                                      "url": url_val,
+                                      "description": text,
+                                      "type": "general"
+                                  })
+                  
+                  # Results (standard web results if available)
+                  for r in data.get("Results", []):
+                      text = r.get("Text", "")
+                      url_val = r.get("FirstURL", "")
+                      if text and url_val:
+                          results.append({
+                              "title": text.split(".")[0][:100],
+                              "url": url_val,
+                              "description": text,
+                              "type": "general"
+                          })
+                  
+              except json.JSONDecodeError as e:
+                  print(f"  DDG API: JSON error: {e}")
+              
+              return results[:max_results]
+
+          # =============================================
+          #  Google Search (Fallback)
+          # =============================================
+          def search_google(query, max_results):
+              """Search via Google (fallback method)."""
+              results = []
+              encoded = urllib.parse.quote(query, safe="")
+              url = f"https://www.google.com/search?q={encoded}&num={max_results}&hl=en"
+              print(f"  Google URL: {url}")
+              
+              html = http_get(url, timeout=30)
+              if not html:
+                  print("  Google: No response")
+                  return results
+              
+              print(f"  Google: Got {len(html)} chars of HTML")
+              
+              def clean_html(text):
+                  text = re.sub(r'<[^>]+>', '', str(text))
+                  text = re.sub(r'&amp;', '&', text)
+                  text = re.sub(r'&lt;', '<', text)
+                  text = re.sub(r'&gt;', '>', text)
+                  text = re.sub(r'&quot;', '"', text)
+                  text = re.sub(r'&#39;', "'", text)
+                  text = re.sub(r'&nbsp;', ' ', text)
+                  text = re.sub(r'\s+', ' ', text).strip()
+                  return text
+              
+              # Google search result pattern
+              # <a href="/url?q=REAL_URL&sa=U">TITLE</a>
+              # <span class="aCOpRe">DESCRIPTION</span>
+              pattern = re.compile(
+                  r'<a[^>]+href="/url\?q=(https?://[^&"]*)[^"]*"[^>]*>(.*?)</a>.*?(?:<span[^>]*class="[^"]*(?:aCOpRe|st|VwiC3b)[^"]*"[^>]*>(.*?)</span>)?',
+                  re.DOTALL
+              )
+              
+              matches = pattern.findall(html)
+              print(f"  Google: Found {len(matches)} potential results")
+              
+              seen_urls = set()
+              for raw_url, raw_title, raw_desc in matches:
+                  url_val = urllib.parse.unquote(clean_html(raw_url))
+                  title = clean_html(raw_title)
+                  desc = clean_html(raw_desc) if raw_desc else ""
+                  
+                  # Skip google.com URLs and duplicates
+                  if "google.com" in url_val or url_val in seen_urls:
+                      continue
+                  seen_urls.add(url_val)
+                  
+                  if title and url_val:
+                      results.append({
+                          "title": title,
+                          "url": url_val,
+                          "description": desc,
+                          "type": "general"
+                      })
+                  
+                  if len(results) >= max_results:
+                      break
+              
+              return results
+
+          # =============================================
+          #  Unified Search
+          # =============================================
+          def search(query, max_results, search_type="general", safe_search="moderate", lang="auto", deep=False):
+              """Unified search with multiple fallback methods."""
+              
+              if deep:
+                  max_results = min(max_results * 3, 50)
+              print(f"Deep search: {deep}, adjusted max: {max_results}")
+              
+              all_results = []
+              seen_urls = set()
+              
+              # For general search, try multiple engines
+              if search_type == "general":
+                  # Method 1: DuckDuckGo Lite HTML
+                  print("\n[1/3] Trying DuckDuckGo Lite...")
+                  results1 = search_ddg_lite(query, max_results)
+                  for r in results1:
+                      if r["url"] not in seen_urls:
+                          all_results.append(r)
+                          seen_urls.add(r["url"])
+                  print(f"  -> Got {len(results1)} results (total: {len(all_results)})")
+                  
+                  # Method 2: DuckDuckGo API
+                  if len(all_results) < max_results:
+                      print("\n[2/3] Trying DuckDuckGo API...")
+                      results2 = search_ddg_api(query, max_results)
+                      for r in results2:
+                          if r["url"] not in seen_urls:
+                              all_results.append(r)
+                              seen_urls.add(r["url"])
+                      print(f"  -> Got {len(results2)} results (total: {len(all_results)})")
+                  
+                  # Method 3: Google (fallback)
+                  if len(all_results) < max_results:
+                      print("\n[3/3] Trying Google...")
+                      results3 = search_google(query, max_results)
+                      for r in results3:
+                          if r["url"] not in seen_urls:
+                              all_results.append(r)
+                              seen_urls.add(r["url"])
+                      print(f"  -> Got {len(results3)} results (total: {len(all_results)})")
+              
+              # For other types, use DuckDuckGo Lite (limited) + DuckDuckGo API
+              elif search_type == "news":
+                  print("\n[1/2] Trying DuckDuckGo Lite for news...")
+                  encoded = urllib.parse.quote(query, safe="")
+                  news_url = f"https://lite.duckduckgo.com/lite/?q={encoded}&df=w"
+                  html = http_get(news_url, timeout=30)
+                  if html:
+                      link_pattern = re.compile(r'<a[^>]+class="result-link"[^>]+href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+                      snippet_pattern = re.compile(r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>', re.DOTALL)
+                      links = link_pattern.findall(html)
+                      snippets = snippet_pattern.findall(html)
+                      for i, (ru, rt) in enumerate(links):
+                          if i >= max_results: break
+                          t = re.sub(r'<[^>]+>', '', str(rt)).strip()
+                          u = re.sub(r'<[^>]+>', '', str(ru)).strip()
+                          if "uddg=" in u:
+                              try:
+                                  from urllib.parse import parse_qs, urlparse
+                                  qs = parse_qs(urlparse(u).query)
+                                  u = urllib.parse.unquote(qs["uddg"][0])
+                              except: pass
+                          d = re.sub(r'<[^>]+>', '', str(snippets[i])).strip() if i < len(snippets) else ""
+                          if t and u and u.startswith("http") and u not in seen_urls:
+                              all_results.append({"title": t, "url": u, "description": d, "type": "news"})
+                              seen_urls.add(u)
+                  print(f"  -> Got {len(all_results)} news results")
+              
+              elif search_type == "images":
+                  print("\n[1/2] Trying DuckDuckGo image search...")
+                  encoded = urllib.parse.quote(query, safe="")
+                  img_url = f"https://lite.duckduckgo.com/lite/?q={encoded}&iax=images&ia=images"
+                  html = http_get(img_url, timeout=30)
+                  if html:
+                      # DDG Lite image results
+                      img_pattern = re.compile(r'<a[^>]+href="(https?://[^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+                      matches = img_pattern.findall(html)
+                      for raw_u, raw_t in matches:
+                          t = re.sub(r'<[^>]+>', '', str(raw_t)).strip()
+                          u = re.sub(r'<[^>]+>', '', str(raw_u)).strip()
+                          if "uddg=" in u:
+                              try:
+                                  from urllib.parse import parse_qs, urlparse
+                                  qs = parse_qs(urlparse(u).query)
+                                  u = urllib.parse.unquote(qs["uddg"][0])
+                              except: pass
+                          if t and u and u.startswith("http") and "duckduckgo" not in u and u not in seen_urls:
+                              all_results.append({"title": t, "url": u, "thumbnail": u, "image": u, "type": "image"})
+                              seen_urls.add(u)
+                          if len(all_results) >= max_results: break
+                  print(f"  -> Got {len(all_results)} image results")
+              
+              elif search_type == "videos":
+                  print("\n[1/2] Trying DuckDuckGo video search...")
+                  encoded = urllib.parse.quote(query, safe="")
+                  vid_url = f"https://lite.duckduckgo.com/lite/?q={encoded}&iax=videos&ia=videos"
+                  html = http_get(vid_url, timeout=30)
+                  if html:
+                      link_pattern = re.compile(r'<a[^>]+class="result-link"[^>]+href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+                      snippet_pattern = re.compile(r'<td[^>]+class="result-snippet"[^>]*>(.*?)</td>', re.DOTALL)
+                      links = link_pattern.findall(html)
+                      snippets = snippet_pattern.findall(html)
+                      for i, (ru, rt) in enumerate(links):
+                          if i >= max_results: break
+                          t = re.sub(r'<[^>]+>', '', str(rt)).strip()
+                          u = re.sub(r'<[^>]+>', '', str(ru)).strip()
+                          if "uddg=" in u:
+                              try:
+                                  from urllib.parse import parse_qs, urlparse
+                                  qs = parse_qs(urlparse(u).query)
+                                  u = urllib.parse.unquote(qs["uddg"][0])
+                              except: pass
+                          d = re.sub(r'<[^>]+>', '', str(snippets[i])).strip() if i < len(snippets) else ""
+                          if t and u and u.startswith("http") and u not in seen_urls:
+                              all_results.append({"title": t, "url": u, "description": d, "type": "video"})
+                              seen_urls.add(u)
+                  print(f"  -> Got {len(all_results)} video results")
+              
+              return all_results[:max_results]
+
+          def format_results_markdown(results, query, search_type):
+              """Format results as markdown."""
+              now = datetime.now(timezone(timedelta(hours=3, minutes=30)))
+              ts = now.strftime("%Y-%m-%d %H:%M:%S")
+              
+              type_labels = {
+                  "general": "Web Search",
+                  "news": "News Search",
+                  "images": "Image Search",
+                  "videos": "Video Search"
+              }
+              
+              md = f"# Search Results\n\n"
+              md += f"| Key | Value |\n|-----|-------|\n"
+              md += f"| **Query** | {query} |\n"
+              md += f"| **Type** | {type_labels.get(search_type, search_type)} |\n"
+              md += f"| **Results** | {len(results)} |\n"
+              md += f"| **Date** | {ts} (Asia/Tehran) |\n\n"
+              md += "---\n\n"
+              
+              if not results:
+                  md += "> No results found. Try a different query or check spelling.\n"
+                  return md
+              
+              for i, r in enumerate(results, 1):
+                  md += f"## {i}. {r['title']}\n\n"
+                  if r.get('url'):
+                      md += f"**URL:** [{r['url']}]({r['url']})\n\n"
+                  if r.get('description'):
+                      md += f"{r['description']}\n\n"
+                  if r.get('source'):
+                      md += f"*Source: {r['source']}*\n\n"
+                  if r.get('thumbnail') and r.get('image'):
+                      md += f"[![image]({r['thumbnail']})]({r['image']})\n\n"
+                  md += "---\n\n"
+              
+              return md
+
+          def generate_ai_summary(results, query):
+              """Generate AI summary of search results."""
+              if not results:
+                  return ""
+              print("  Generating AI summary...")
+              try:
+                  items = []
+                  for r in results[:5]:
+                      t = r.get("title", "")
+                      d = r.get("description", "")[:200]
+                      items.append(f"- {t}: {d}")
+                  context = "\n".join(items)
+                  
+                  prompt = (
+                      f"Based on these search results for \"{query}\", "
+                      f"provide a concise summary in 3-5 bullet points. "
+                      f"Use the same language as the query. "
+                      f"If Persian, respond in Persian.\n\n"
+                      f"Results:\n{context}\n\nSummary:"
+                  )
+                  
+                  payload = {
+                      "messages": [
+                          {"role": "system", "content": "You are a helpful search assistant. Summarize concisely. Respond in the same language as the query."},
+                          {"role": "user", "content": prompt}
+                      ],
+                      "model": "openai",
+                      "temperature": 0.3
+                  }
+                  
+                  raw = http_post_json("https://text.pollinations.ai/openai", payload, timeout=60)
+                  if not raw:
+                      return "(AI summary: request failed)"
+                  
+                  try:
+                      parsed = json.loads(raw)
+                      if isinstance(parsed, dict):
+                          return parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+                      return str(parsed)
+                  except:
+                      return raw
+              except Exception as e:
+                  return f"(AI summary error: {str(e)[:100]})"
+
+          def main():
+              config_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ai_melli_config.json"
+              with open(config_path) as f:
+                  cfg = json.load(f)
+              
+              query = cfg["query"]
+              max_results = min(int(cfg.get("num_results", "10")), 20)
+              search_type = cfg.get("search_type", "general")
+              safe = cfg.get("safe_search", "moderate")
+              lang = cfg.get("language", "auto")
+              deep = cfg.get("deep_search", "false").lower() == "true"
+              ai_summary = cfg.get("include_ai_summary", "true").lower() == "true"
+              out_dir = cfg.get("output_dir", "output")
+              os.makedirs(out_dir, exist_ok=True)
+              
+              print(f"=== AI Melli Search ===")
+              print(f"Query: {query}")
+              print(f"Type: {search_type}")
+              print(f"Max: {max_results}")
+              print(f"Language: {lang}")
+              print(f"Deep: {deep}")
+              print(f"AI Summary: {ai_summary}")
+              print(f"")
+              
+              # Search
+              results = search(query, max_results, search_type, safe, lang)
+              
+              print(f"\n=== Total results: {len(results)} ===")
+              
+              # Format
+              md = format_results_markdown(results, query, search_type)
+              
+              # AI Summary
+              summary = ""
+              if ai_summary and results:
+                  summary = generate_ai_summary(results, query)
+                  if summary:
+                      md = f"## AI Summary\n\n{summary}\n\n---\n\n" + md
+                      print(f"Summary: {summary[:100]}...")
+              
+              # Save markdown
+              timestamp = time.strftime("%Y%m%d_%H%M%S")
+              safe_q = "".join(c if c.isalnum() or c in "_-" else "_" for c in query[:40])
+              md_path = os.path.join(out_dir, f"search_{safe_q}_{timestamp}.md")
+              with open(md_path, "w", encoding="utf-8") as f:
+                  f.write(md)
+              
+              # Save JSON
+              json_path = os.path.join(out_dir, f"search_{safe_q}_{timestamp}.json")
+              with open(json_path, "w", encoding="utf-8") as f:
+                  json.dump({
+                      "query": query,
+                      "search_type": search_type,
+                      "timestamp": timestamp,
+                      "total_results": len(results),
+                      "ai_summary": summary,
+                      "results": results
+                  }, f, ensure_ascii=False, indent=2)
+              
+              print(f"\n=== Done ===")
+              print(f"Markdown: {md_path}")
+              print(f"JSON: {json_path}")
+              
+              with open("/tmp/ai_melli_result.json", "w") as f:
+                  json.dump({
+                      "total": len(results),
+                      "md_file": md_path,
+                      "json_file": json_path
+                  }, f)
+              
+              if not results:
+                  print("WARNING: No results found!")
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      # ======== Build Config & Run ========
+      - name: "🔍 Search"
+        id: search
+        shell: bash
+        run: |
+          jq -n \
+            --arg query "${{ github.event.inputs.query }}" \
+            --arg num "${{ github.event.inputs.num_results }}" \
+            --arg type "${{ github.event.inputs.search_type }}" \
+            --arg safe "${{ github.event.inputs.safe_search }}" \
+            --arg lang "${{ github.event.inputs.language }}" \
+            --arg deep "${{ github.event.inputs.deep_search }}" \
+            --arg ai "${{ github.event.inputs.include_ai_summary }}" \
+            --arg outdir "output" \
+            '{
+              query: $query,
+              num_results: ($num | tonumber),
+              search_type: $type,
+              safe_search: $safe,
+              language: $lang,
+              deep_search: $deep,
+              include_ai_summary: $ai,
+              output_dir: $outdir
+            }' > /tmp/ai_melli_config.json
+
+          echo "Config:"
+          cat /tmp/ai_melli_config.json
+          echo ""
+
+          python3 scripts/web_search.py /tmp/ai_melli_config.json
+
+          if [ -f /tmp/ai_melli_result.json ]; then
+            echo "total=$(jq -r '.total' /tmp/ai_melli_result.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ======== Summary ========
+      - name: "📊 Summary"
+        if: always()
+        shell: bash
+        run: |
+          echo "╔═══════════════════════════════════════╗"
+          echo "║   Web Search — Complete                ║"
+          echo "╠═══════════════════════════════════════╣"
+          echo "║ Query    : ${{ github.event.inputs.query }}"
+          echo "║ Type     : ${{ github.event.inputs.search_type }}"
+          echo "║ Results  : ${{ steps.search.outputs.total }}"
+          echo "║ AI Summ  : ${{ github.event.inputs.include_ai_summary }}"
+          echo "╚═══════════════════════════════════════╝"
+
+      # ======== Upload to Repository ========
+      - name: "📦 Push to Repository"
+        if: github.event.inputs.upload_method == 'repository'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/
+          git commit -m "Search: ${{ github.event.inputs.query }} [skip ci]" || echo "No changes"
+          git push
+
+      # ======== Upload to Release ========
+      - name: "🚀 Upload to Release"
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('search-{0}', github.run_number) }}
+          name: "Search — ${{ github.event.inputs.query }}"
+          body: |
+            ## Web Search Results
+            - **Query:** ${{ github.event.inputs.query }}
+            - **Type:** ${{ github.event.inputs.search_type }}
+            - **Results:** ${{ steps.search.outputs.total }}
+            - **AI Summary:** ${{ github.event.inputs.include_ai_summary }}
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ======== Cleanup ========
+      - name: "🧹 Cleanup"
+        if: always()
+        run: rm -rf output /tmp/ai_melli_*.json
