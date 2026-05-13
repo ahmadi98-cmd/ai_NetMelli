@@ -1,0 +1,272 @@
+# ============================================================
+# 🎨 AI Melli — Image Generation
+# ============================================================
+
+name: "🎨 Image Generation"
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Prompt (English recommended)"
+        required: true
+        type: string
+
+      negative_prompt:
+        description: "Negative prompt (what to avoid)"
+        required: false
+        default: ""
+        type: string
+
+      model:
+        description: "AI Model"
+        required: true
+        default: "flux"
+        type: choice
+        options:
+          - flux
+          - turbo
+          - flux-realism
+          - flux-cablyai
+          - flux-anime
+          - flux-3d
+          - flux-pro
+          - any-dark
+
+      width:
+        description: "Width (px)"
+        required: false
+        default: "1024"
+        type: string
+
+      height:
+        description: "Height (px)"
+        required: false
+        default: "1024"
+        type: string
+
+      num_images:
+        description: "Number of images (1-10)"
+        required: false
+        default: "1"
+        type: string
+
+      seed:
+        description: "Seed (empty = random)"
+        required: false
+        default: ""
+        type: string
+
+      nologo:
+        description: "Remove watermark"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      upload_method:
+        description: "Upload Method"
+        required: true
+        default: "repository"
+        type: choice
+        options:
+          - repository
+          - release
+
+      release_tag:
+        description: "Release Tag (empty = auto)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: "📁 Prepare scripts"
+        shell: bash
+        run: mkdir -p scripts
+
+      - name: "🐍 Create image generator script"
+        shell: bash
+        run: |
+          cat > scripts/generate_image.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import urllib.request, urllib.parse, json, sys, os, time, random
+
+          def generate_image(prompt, output_path, model="flux", width=1024, height=1024,
+                             seed=None, nologo=True, negative=None, retries=2):
+              encoded = urllib.parse.quote(prompt, safe='')
+              params = {"width": width, "height": height, "model": model,
+                        "nologo": str(nologo).lower(), "nofeed": "true"}
+              if seed is not None:
+                  params["seed"] = seed
+              if negative:
+                  params["negative"] = urllib.parse.quote(negative, safe='')
+              query = "&".join(f"{k}={v}" for k, v in params.items())
+              url = f"https://image.pollinations.ai/prompt/{encoded}?{query}"
+              print(f"  URL: {url[:150]}...")
+              for attempt in range(retries + 1):
+                  try:
+                      req = urllib.request.Request(url)
+                      req.add_header("User-Agent", "AI-Melli/1.0")
+                      with urllib.request.urlopen(req, timeout=180) as resp:
+                          data = resp.read()
+                      if len(data) < 500:
+                          print(f"  Too small ({len(data)} bytes), retrying...")
+                          continue
+                      with open(output_path, "wb") as f:
+                          f.write(data)
+                      print(f"  OK: {output_path} ({len(data)/1024:.1f} KB)")
+                      return True
+                  except Exception as e:
+                      print(f"  Attempt {attempt+1} error: {e}")
+                      if attempt < retries:
+                          time.sleep(5)
+              return False
+
+          def main():
+              config_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ai_melli_config.json"
+              with open(config_path) as f:
+                  cfg = json.load(f)
+              prompt = cfg["prompt"]
+              model = cfg.get("model", "flux")
+              width = int(cfg.get("width", "1024"))
+              height = int(cfg.get("height", "1024"))
+              num = min(int(cfg.get("num_images", "1")), 10)
+              seed_str = cfg.get("seed", "")
+              nologo = cfg.get("nologo", "true").lower() == "true"
+              negative = cfg.get("negative_prompt", "")
+              out_dir = cfg.get("output_dir", "output")
+              os.makedirs(out_dir, exist_ok=True)
+              base_seed = None
+              if seed_str and seed_str.strip():
+                  try: base_seed = int(seed_str)
+                  except: base_seed = random.randint(1, 999999)
+              ok, fail = 0, 0
+              for i in range(1, num + 1):
+                  print(f"\n--- Image {i}/{num} ---")
+                  cs = base_seed + i - 1 if base_seed is not None else random.randint(1, 999999)
+                  safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in prompt[:50])
+                  ts = time.strftime("%Y%m%d_%H%M%S")
+                  op = os.path.join(out_dir, f"{safe}_{ts}_{i}.png")
+                  if generate_image(prompt, op, model, width, height, cs, nologo, negative or None):
+                      ok += 1
+                  else:
+                      fail += 1
+                      if os.path.exists(op): os.remove(op)
+                  if i < num: time.sleep(3)
+              with open("/tmp/ai_melli_result.json", "w") as f:
+                  json.dump({"success": ok, "failed": fail}, f)
+              print(f"\n=== {ok} ok, {fail} failed ===")
+              if ok == 0: sys.exit(1)
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      # ======== Build Config & Run ========
+      - name: "🎨 Generate Images"
+        id: gen
+        shell: bash
+        run: |
+          # Build config JSON safely
+          jq -n \
+            --arg prompt "${{ github.event.inputs.prompt }}" \
+            --arg negative "${{ github.event.inputs.negative_prompt }}" \
+            --arg model "${{ github.event.inputs.model }}" \
+            --arg width "${{ github.event.inputs.width }}" \
+            --arg height "${{ github.event.inputs.height }}" \
+            --arg num "${{ github.event.inputs.num_images }}" \
+            --arg seed "${{ github.event.inputs.seed }}" \
+            --arg nologo "${{ github.event.inputs.nologo }}" \
+            --arg outdir "output" \
+            '{
+              prompt: $prompt,
+              negative_prompt: $negative,
+              model: $model,
+              width: $width,
+              height: $height,
+              num_images: $num,
+              seed: $seed,
+              nologo: $nologo,
+              output_dir: $outdir
+            }' > /tmp/ai_melli_config.json
+
+          echo "Config:"
+          cat /tmp/ai_melli_config.json
+
+          python3 scripts/generate_image.py /tmp/ai_melli_config.json
+
+          # Read results
+          if [ -f /tmp/ai_melli_result.json ]; then
+            echo "success=$(jq -r '.success' /tmp/ai_melli_result.json)" >> "$GITHUB_OUTPUT"
+            echo "failed=$(jq -r '.failed' /tmp/ai_melli_result.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo ""
+          echo "Generated files:"
+          ls -lh output/ 2>/dev/null || echo "No files"
+
+      # ======== Summary ========
+      - name: "📊 Summary"
+        if: always()
+        shell: bash
+        run: |
+          echo "╔═══════════════════════════════════════╗"
+          echo "║   Image Generation — Complete         ║"
+          echo "╠═══════════════════════════════════════╣"
+          echo "║ Model    : ${{ github.event.inputs.model }}"
+          echo "║ Success  : ${{ steps.gen.outputs.success }}"
+          echo "║ Failed   : ${{ steps.gen.outputs.failed }}"
+          echo "╚═══════════════════════════════════════╝"
+
+      # ======== Upload to Repository ========
+      - name: "📦 Push to Repository"
+        if: github.event.inputs.upload_method == 'repository'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/
+          git commit -m "Image: ${{ github.event.inputs.prompt }} [skip ci]" || echo "No changes"
+          git push
+
+      # ======== Upload to Release ========
+      - name: "🚀 Upload to Release"
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('img-{0}', github.run_number) }}
+          name: "AI Image — ${{ github.event.inputs.model }}"
+          body: |
+            ## Generated Images
+            - **Model:** ${{ github.event.inputs.model }}
+            - **Prompt:** ${{ github.event.inputs.prompt }}
+            - **Size:** ${{ github.event.inputs.width }}x${{ github.event.inputs.height }}
+            - **Success:** ${{ steps.gen.outputs.success }}
+            - **Failed:** ${{ steps.gen.outputs.failed }}
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ======== Cleanup ========
+      - name: "🧹 Cleanup"
+        if: github.event.inputs.upload_method == 'repository'
+        run: rm -rf output
