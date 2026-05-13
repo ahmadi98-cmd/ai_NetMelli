@@ -183,9 +183,7 @@ ai_melli/
 
 ---
 
-## 🤝 مشارکت
 
-ایده‌ای برای قابلیت جدید داری؟ یک [Issue](https://github.com/amirabolfazle/ai_melli/issues) باز کن و پیشنهادت رو بنویس.
 
 ---
 
